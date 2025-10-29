@@ -1,563 +1,444 @@
+import time
 import cv2
 import numpy as np
-import time
-import imutils
-import tkinter as tk
-from tkinter import messagebox
-from PIL import Image, ImageTk
 import serial
-import serial.tools.list_ports
-from math import *
+from collections import deque
+# Assuming PIDController is correctly defined in PID_controller.py
+from PID_controller import PIDController 
 
-# Utility function to find an external USB camera
-def guess_usb_camera_index():
-    # Attempt to find a camera index that is likely a USB camera (skip 0, usually the laptop camera)
-    cam = cv2.VideoCapture(0)
-    return 0  # Fallback to 0
+BOARD_DIMENSIONS = (500, 625)
+# --- CHANGED: Serial communication is now enabled by default ---
+SERIAL_ENABLED = True
 
-# Load and parse calibration data
-lines = open("data.txt").read().splitlines()
-lines = lines[:-11]     # Remove last 11 lines
-lines = lines[1:]       # Remove the first line
+# --- Constants for visual offset ---
+PIXELS_PER_CM = 15
+OFFSET_CM = 1
+OFFSET_PX = int(OFFSET_CM * PIXELS_PER_CM)
 
-dataDict = {}
+# --- Predefined Color Range for the Board (UPDATED TO MATCH IMAGE) ---
+# These values are derived from the 'Color Tuning' window in the provided image.
+LOWER_YELLOW = np.array([7, 63, 121]) # H_min 7, S_min 63, V_min 121
+UPPER_YELLOW = np.array([32, 255, 255]) # H_max 32, S_max 255, V_max 255
 
-camHeight = 480
-camWidth = 640
+# --- CHANGED: Increased PID gains for more aggressive and accurate centering ---
+# Initialize PID controllers
+pid_x = PIDController(Kp=1.2, Ki=0.05, Kd=0.2, setpoint=(BOARD_DIMENSIONS[0] / 2) + OFFSET_PX)
+pid_y = PIDController(Kp=1.2, Ki=0.05, Kd=0.2, setpoint=(BOARD_DIMENSIONS[1] / 2) + OFFSET_PX)
 
-# Use guessed USB camera index, fallback to 0 if not found
-usb_cam_index = guess_usb_camera_index()
-cam = cv2.VideoCapture(usb_cam_index)
-if not cam.isOpened():
-    print("Error: Could not open USB camera (tried index {}).".format(usb_cam_index))
-cam.set(3, camWidth)
-cam.set(4, camHeight)
 
-getPixelColor = False
-H, S, V = 15, 10 , 75
+# --- Temporal smoothing for board corners ---
+corner_history = deque(maxlen=5)
+last_valid_corners = None
 
-mouseX, mouseY = 0, 0
+# --- Ball HSV Color Range (will be updated by trackbars) ---
+ball_hsv_lower = np.array([25, 0, 80])
+ball_hsv_upper = np.array([105, 83, 255])
 
-for i in range(0, len(lines)):
-    line = lines[i].strip()
-    if not line or "#" not in line:
-        print(f"[Warning] Skipping invalid or empty line {i}: {repr(line)}")
-        continue
+
+if SERIAL_ENABLED:
     try:
-        key, value = line.split("#")
-        alpha, beta = key.split("|")
-        angleA, angleB, angleC = value.split("|")
-        dataDict[(float(alpha), float(beta))] = (float(angleA), float(angleB), float(angleC))
+        # NOTE: You may need to change this port to match your Arduino's serial port
+        # UPDATED PORT to match your provided code
+        ser = serial.Serial('/dev/cu.usbmodem12301', 9600, timeout=1)
+        print("Serial connection established")
     except Exception as e:
-        print(f"[Error] Skipping line {i} due to parsing error: {e}")
-        continue
+        print(f"Failed to connect to serial port: {e}")
+        SERIAL_ENABLED = False
 
-controllerWindow = tk.Tk()
-controllerWindow.title("Control Window")
-controllerWindow.geometry("820x500")
-controllerWindow["bg"] = "white"
-controllerWindow.resizable(0, 0)
-
-videoWindow = tk.Toplevel(controllerWindow)
-videoWindow.title("Camera Feed")
-videoWindow.resizable(0, 0)
-lmain = tk.Label(videoWindow)
-lmain.pack()
-videoWindow.withdraw()
-
-graphWindow = tk.Toplevel(controllerWindow)
-graphWindow.title("Position over Time")
-graphWindow.resizable(0, 0)
-graphCanvas = tk.Canvas(graphWindow, width=camHeight + 210, height=camHeight)
-graphCanvas.pack()
-graphWindow.withdraw()
-
-pointsListCircle = []
-def createPointsListCircle(radius):
-    global pointsListCircle
-    for angle in range(0, 360):
-        angle_ = angle - 90
-        pointsListCircle.append([radius * cos(radians(angle_)) + 240, radius * sin(radians(angle_)) + 240])
-createPointsListCircle(150)
-
-pointsListEight = []
-def createPointsListEight(radius):
-    global pointsListEight
-    for angle in range(270, 270 + 360):
-        pointsListEight.append([radius * cos(radians(angle)) + 240, radius * sin(radians(angle)) + 240 + radius])
-    for angle in range(360, 0, -1):
-        angle_ = angle + 90
-        pointsListEight.append([radius * cos(radians(angle_)) + 240, radius * sin(radians(angle_)) + 240 - radius])
-createPointsListEight(80)
-
-drawCircleBool = False
-def startDrawCircle():
-    global drawCircleBool, drawEightBool, consigneX, consigneY
-    if not drawCircleBool:
-        drawCircleBool = True
-        BballDrawCircle["text"] = "Center the Ball"
-    else:
-        drawCircleBool = False
-        consigneX, consigneY = 240, 240
-        sliderCoefP.set(sliderCoefPDefault)
-        BballDrawCircle["text"] = "Move Ball in Circle"
-
-drawEightBool = False
-def startDrawEight():
-    global drawEightBool, drawCircleBool, consigneX, consigneY
-    if not drawEightBool:
-        drawEightBool = True
-        BballDrawEight["text"] = "Center the Ball"
-    else:
-        drawEightBool = False
-        consigneX, consigneY = 240, 240
-        sliderCoefP.set(sliderCoefPDefault)
-        BballDrawEight["text"] = "Move Ball in Eight"
-
-pointCounter = 0
-def drawWithBall():
-    global pointCounter, consigneX, consigneY
-    if drawCircleBool:
-        sliderCoefP.set(15)
-        if pointCounter >= len(pointsListCircle):
-            pointCounter = 0
-        point = pointsListCircle[pointCounter]
-        consigneX, consigneY = point[0], point[1]
-        pointCounter += 7
-    if drawEightBool:
-        sliderCoefP.set(15)
-        if pointCounter >= len(pointsListEight):
-            pointCounter = 0
-        point = pointsListEight[pointCounter]
-        consigneX, consigneY = point[0], point[1]
-        pointCounter += 7
-
-def setConsigneWithMouse(mousePosition):
-    global consigneX, consigneY
-    if mousePosition.y > 10:
-        refreshGraph()
-        consigneX, consigneY = mousePosition.x, mousePosition.y
-
-def getMouseClickPosition(mousePosition):
-    global mouseX, mouseY
-    global getPixelColor
-    mouseX, mouseY = mousePosition.x, mousePosition.y
-    getPixelColor = True
-
-showVideoWindow = False
-def showCameraFrameWindow():
-    global showVideoWindow, showGraph
-    if not showVideoWindow:
-        if showGraph:
-            graphWindow.withdraw()
-            showGraph = False
-            BafficherGraph["text"] = "Show Graph"
-        videoWindow.deiconify()
-        showVideoWindow = True
-        BRetourVideo["text"] = "Hide Camera Feed"
-    else:
-        videoWindow.withdraw()
-        showVideoWindow = False
-        BRetourVideo["text"] = "Show Camera Feed"
-
-showCalibrationOverlay = False
-def showCalibrationOverlayFunc():
-    global showCalibrationOverlay
-    showCalibrationOverlay = not showCalibrationOverlay
-
-showGraph = False
-def showGraphWindow():
-    global showGraph, showVideoWindow
-    if not showGraph:
-        if showVideoWindow:
-            videoWindow.withdraw()
-            showVideoWindow = False
-            BRetourVideo["text"] = "Show Camera Feed"
-        showGraph = True
-        BafficherGraph["text"] = "Hide Graph"
-    else:
-        showGraph = False
-        BafficherGraph["text"] = "Show Graph"
-
-t = 480
-consigneY = 240
-consigneX = 240
-def paintGraph():
-    global t, consigneY, x, y, prevX, prevY, alpha, prevAlpha
-    global showGraphPositionX, showGraphPositionY, showGraphAlpha
-    if showGraph:
-        graphWindow.deiconify()
-        if showGraphPositionX.get() == 1:
-            graphCanvas.create_line(t - 3, prevX, t, x, fill="#b20000", width=2)
-        if showGraphPositionY.get() == 1:
-            graphCanvas.create_line(t - 3, prevY, t, y, fill="#0069b5", width=2)
-        if showGraphAlpha.get() == 1:
-            graphCanvas.create_line(t - 3, 240 - prevAlpha * 3, t, 240 - alpha * 3, fill="#8f0caf", width=2)
-        if t >= 480:
-            t = 0
-            graphCanvas.delete("all")
-            graphCanvas.create_line(3, 3, 480, 3, fill="black", width=3)
-            graphCanvas.create_line(3, 480, 480, 480, fill="black", width=3)
-            graphCanvas.create_line(3, 3, 3, 480, fill="black", width=3)
-            graphCanvas.create_line(480, 3, 480, 480, fill="black", width=3)
-            graphCanvas.create_line(550, 32, 740, 32, fill="#b20000", width=5)
-            graphCanvas.create_line(550, 53, 740, 53, fill="#0069b5", width=5)
-            graphCanvas.create_line(550, 73, 740, 73, fill="#8f0caf", width=5)
-            if showGraphPositionX.get() == 1:
-                graphCanvas.create_line(3, consigneX, 480, consigneX, fill="#ff7777", width=2)
-            if showGraphPositionY.get() == 1:
-                graphCanvas.create_line(3, consigneY, 480, consigneY, fill="#6f91f7", width=2)
-        t += 3
-    else:
-        graphWindow.withdraw()
-
-def refreshGraph():
-    global t
-    t = 480
-
-def endProgram():
-    controllerWindow.destroy()
-
-sliderHDefault = 20   # Larger to capture wider Hue range for dark colors
-sliderSDefault = 50
-sliderVDefault = 30
-sliderCoefPDefault = 10
-sliderCoefIDefault = 0.1
-sliderCoefDDefault = 5.7
-
-def resetSlider():
-    sliderH.set(sliderHDefault)
-    sliderS.set(sliderSDefault)
-    sliderV.set(sliderVDefault)
-    sliderCoefP.set(sliderCoefPDefault)
-    sliderCoefI.set(sliderCoefIDefault)
-    sliderCoefD.set(sliderCoefDDefault)
-
-def donothing():
+def nothing(x):
     pass
 
-def lowerPlatform():
-    if arduinoIsConnected:
-        if messagebox.askokcancel("Warning", "Please remove the platform."):
-            print("Lowering arms")
-            ser.write(("descendArms\n").encode())
+def update_pid_from_sliders():
+    """Update PID parameters from trackbar values"""
+    pid_x.Kp = cv2.getTrackbarPos("Kp_X", "PID Tuning") / 100.0
+    pid_x.Ki = cv2.getTrackbarPos("Ki_X", "PID Tuning") / 1000.0
+    pid_x.Kd = cv2.getTrackbarPos("Kd_X", "PID Tuning") / 100.0
+
+    pid_y.Kp = cv2.getTrackbarPos("Kp_Y", "PID Tuning") / 100.0
+    pid_y.Ki = cv2.getTrackbarPos("Ki_Y", "PID Tuning") / 1000.0
+    pid_y.Kd = cv2.getTrackbarPos("Kd_Y", "PID Tuning") / 100.0
+
+def update_ball_hsv_from_sliders():
+    """Update ball HSV color range from trackbar values"""
+    global ball_hsv_lower, ball_hsv_upper
+    h_min = cv2.getTrackbarPos("H_min_ball", "PID Tuning")
+    s_min = cv2.getTrackbarPos("S_min_ball", "PID Tuning")
+    v_min = cv2.getTrackbarPos("V_min_ball", "PID Tuning")
+    h_max = cv2.getTrackbarPos("H_max_ball", "PID Tuning")
+    s_max = cv2.getTrackbarPos("S_max_ball", "PID Tuning")
+    v_max = cv2.getTrackbarPos("V_max_ball", "PID Tuning")
+    ball_hsv_lower = np.array([h_min, s_min, v_min])
+    ball_hsv_upper = np.array([h_max, s_max, v_max])
+
+
+def smooth_corners(new_corners):
+    """Apply temporal smoothing to corner positions to reduce jitter."""
+    global corner_history, last_valid_corners
+    
+    if new_corners is None:
+        return last_valid_corners
+    
+    corner_history.append(new_corners)
+    
+    smoothed = np.mean(corner_history, axis=0)
+    
+    last_valid_corners = smoothed.astype(np.float32)
+    return last_valid_corners
+
+def order_points_improved(pts):
+    """Order points: top-left, top-right, bottom-right, bottom-left"""
+    pts = pts.astype(np.float32)
+    center = np.mean(pts, axis=0)
+
+    rect = np.zeros((4, 2), dtype=np.float32)
+    top_pts = pts[pts[:, 1] < center[1]]
+    bottom_pts = pts[pts[:, 1] >= center[1]]
+
+    if len(top_pts) == 2 and len(bottom_pts) == 2:
+        top_sorted = top_pts[np.argsort(top_pts[:, 0])]
+        bottom_sorted = bottom_pts[np.argsort(bottom_pts[:, 0])]
+        rect[0], rect[1], rect[2], rect[3] = top_sorted[0], top_sorted[1], bottom_sorted[1], bottom_sorted[0]
     else:
-        if messagebox.askokcancel("Warning", "Arduino is not connected"):
-            donothing()
+        s = pts.sum(axis=1)
+        diff = np.diff(pts, axis=1)
+        rect[0], rect[2], rect[1], rect[3] = pts[np.argmin(s)], pts[np.argmax(s)], pts[np.argmin(diff)], pts[np.argmax(diff)]
 
-def raisePlatform():
-    global alpha
-    if arduinoIsConnected:
-        if messagebox.askokcancel("Warning", "Please remove the platform."):
-            print("Raising arms")
-            ser.write((str(dataDict[(0, 0)]) + "\n").encode())
-            alpha = 0
-    else:
-        if messagebox.askokcancel("Warning", "Arduino is not connected"):
-            donothing()
+    return rect
 
-def servosTest():
-    if arduinoIsConnected:
-        if messagebox.askokcancel("Warning", "Platform must be in place."):
-            for i in range(2):
-                beta = 0
-                alpha = 35
-                while beta < 360:
-                    ser.write((str(dataDict[(alpha, beta)]) + "\n").encode())
-                    ser.flush()
-                    time.sleep(0.002)
-                    beta = round(beta + 0.2, 2)
-                    print(alpha, beta)
-            time.sleep(1)
-            ser.write((str(dataDict[(0, 0)]) + "\n").encode())
-    else:
-        if messagebox.askokcancel("Warning", "Arduino is not connected"):
-            donothing()
+def detect_yellow_board_robust(frame, lower_bound, upper_bound, output_size=BOARD_DIMENSIONS, debug=False):
+    """Detect the yellow board using slider values and stable corner finding."""
+    if frame is None:
+        return None, None, None, None
 
-arduinoIsConnected = False
-def connectArduino():
-    global ser
-    global label
-    global arduinoIsConnected
-    ports = list(serial.tools.list_ports.comports())
-    for p in ports:
-        if "Arduino" in p.description:
-            print(p)
-            ser = serial.Serial(p[0], 19200, timeout=1)
-            time.sleep(1)
-            label.configure(text="Arduino connected", fg="#36db8b")
-            arduinoIsConnected = True
+    original_frame = frame.copy()
+    mask = None
 
-startBalanceBall = False
-def startBalance():
-    global startBalanceBall
-    if arduinoIsConnected:
-        if not startBalanceBall:
-            startBalanceBall = True
-            BStartBalance["text"] = "Stop"
-        else:
-            startBalanceBall = False
-            BStartBalance["text"] = "Start"
-    else:
-        if messagebox.askokcancel("Warning", "Arduino is not connected"):
-            donothing()
+    try:
+        blurred = cv2.GaussianBlur(frame, (7, 7), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+        
+        current_mask = cv2.inRange(hsv, lower_bound, upper_bound)
+        
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        mask = cv2.morphologyEx(current_mask, cv2.MORPH_CLOSE, kernel, iterations=4)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
 
-sommeErreurX = 1
-sommeErreurY = 1
-timeInterval = 1
-alpha, beta, prevAlpha, prevBeta = 0, 0, 0, 0
-omega = 0.2
-def PIDcontrol(ballPosX, ballPosY, prevBallPosX, prevBallPosY, consigneX, consigneY):
-    global omega
-    global sommeErreurX, sommeErreurY
-    global alpha, beta, prevAlpha, prevBeta
-    global startBalanceBall, arduinoIsConnected
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return original_frame, None, None, mask
+        
+        largest_contour = max(contours, key=cv2.contourArea)
 
-    Kp = sliderCoefP.get()
-    Ki = sliderCoefI.get()
-    Kd = sliderCoefD.get()
+        if cv2.contourArea(largest_contour) < 5000:
+             return original_frame, None, None, mask
 
-    Ix = Kp * (consigneX - ballPosX) + Ki * sommeErreurX + Kd * ((prevBallPosX - ballPosX) / 0.0333)
-    Iy = Kp * (consigneY - ballPosY) + Ki * sommeErreurY + Kd * ((prevBallPosY - ballPosY) / 0.0333)
+        rect = cv2.minAreaRect(largest_contour)
+        box = cv2.boxPoints(rect)
+        raw_corners = order_points_improved(box).astype(np.float32)
+        
+        corners = smooth_corners(raw_corners)
+        
+        if corners is None:
+            return original_frame, None, None, mask
+        
+        out_w, out_h = output_size
+        expanded_w, expanded_h = out_w + 2 * OFFSET_PX, out_h + 2 * OFFSET_PX
+        dst = np.array([
+            [OFFSET_PX, OFFSET_PX], [out_w - 1 + OFFSET_PX, OFFSET_PX],
+            [out_w - 1 + OFFSET_PX, out_h - 1 + OFFSET_PX], [OFFSET_PX, out_h - 1 + OFFSET_PX]
+        ], dtype=np.float32)
 
-    Ix = round(Ix / 10000, 4)
-    Iy = round(Iy / 10000, 4)
+        M = cv2.getPerspectiveTransform(corners, dst)
+        warped = cv2.warpPerspective(original_frame, M, (expanded_w, expanded_h), 
+                                     flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+        return warped, corners, None, mask
+    except Exception as e:
+        return original_frame, None, None, mask
 
-    if Ix == 0 and Iy == 0:
-        alpha = 0
-        beta = 0
+def detect_yellow_board_with_validation(frame, lower_bound, upper_bound, output_size=BOARD_DIMENSIONS):
+    """Main wrapper with validation"""
+    if frame is None: return frame, None, None
+    warped, corners, _, mask = detect_yellow_board_robust(frame, lower_bound, upper_bound, output_size, debug=False)
+    if corners is not None and warped is not None:
+        try:
+            gray_warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+            if cv2.countNonZero(gray_warped) > 0.1 * gray_warped.size:
+                return warped, corners, mask
+        except Exception as e: print(f"Validation failed: {e}")
+    return frame, None, mask
 
-    elif Ix != 0 and sqrt(Ix**2 + Iy**2) < 1:
-        beta = atan(Iy / Ix)
-        alpha = asin(sqrt(Ix**2 + Iy**2))
-        beta = degrees(beta)
-        alpha = degrees(alpha)
-        if Ix < 0 and Iy >= 0:
-            beta = abs(beta)
-        elif Ix > 0 and Iy >= 0:
-            beta = 180 - abs(beta)
-        elif Ix > 0 and Iy <= 0:
-            beta = 180 + abs(beta)
-        elif Ix < 0 and Iy <= 0:
-            beta = 360 - abs(beta)
+def detect_ball(frame, lower_bound, upper_bound, debug=False):
+    """
+    Detects the ball using a robust hybrid method: a user-tunable color filter
+    followed by a rigid shape (circularity) analysis.
+    """
+    if frame is None: return None, None, None
+    try:
+        output_frame = frame.copy()
+        
+        # 1. Blur and convert to HSV color space
+        blurred = cv2.GaussianBlur(frame, (11, 11), 0)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+        
+        # 2. Use the HSV range provided by the trackbars
+        mask = cv2.inRange(hsv, lower_bound, upper_bound)
+        
+        # 3. Clean the mask to remove noise
+        mask = cv2.erode(mask, None, iterations=2)
+        mask = cv2.dilate(mask, None, iterations=2)
+        
+        # Show the mask for debugging
+        cv2.imshow("Ball Mask", mask)
 
-    elif Ix == 0 and sqrt(Ix**2 + Iy**2) < 1:
-        if Iy > 0:
-            beta = 90
-            alpha = asin(sqrt(Ix**2 + Iy**2))
-        elif Iy < 0:
-            beta = 270
-            alpha = asin(sqrt(Ix**2 + Iy**2))
-        alpha = degrees(alpha)
+        # 4. Find contours in the cleaned mask
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        best_candidate = None
+        best_circularity = 0
+        
+        if contours:
+            for cnt in contours:
+                # 5. Apply a strict area filter
+                area = cv2.contourArea(cnt)
+                if not (300 < area < 15000):
+                    continue
 
-    elif Ix != 0 and sqrt(Ix**2 + Iy**2) > 1:
-        beta = degrees(atan(Iy / Ix))
-        alpha = 35
-        if Ix < 0 and Iy >= 0:
-            beta = abs(beta)
-        elif Ix > 0 and Iy >= 0:
-            beta = 180 - abs(beta)
-        elif Ix > 0 and Iy <= 0:
-            beta = 180 + abs(beta)
-        elif Ix < 0 and Iy <= 0:
-            beta = 360 - abs(beta)
+                # 6. Calculate circularity
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter == 0:
+                    continue
+                
+                circularity = 4 * np.pi * (area / (perimeter * perimeter))
+                
+                # 7. Only consider highly circular contours (relaxed slightly to 0.75)
+                if circularity > 0.75:
+                    if circularity > best_circularity:
+                        ((x, y), radius) = cv2.minEnclosingCircle(cnt)
+                        best_circularity = circularity
+                        best_candidate = ((int(x), int(y)), int(radius))
 
-    elif Ix == 0 and sqrt(Ix**2 + Iy**2) > 1:
-        alpha = 35
-        if Iy > 0:
-            beta = 90
-        elif Iy < 0:
-            beta = 270
+        ball_center, ball_radius = best_candidate if best_candidate else (None, None)
+        
+        # Draw the target (blue dot) at the center of the board
+        center_x, center_y = output_frame.shape[1] // 2, output_frame.shape[0] // 2
+        cv2.circle(output_frame, (center_x, center_y), 8, (255, 100, 0), -1)
+        
+        return output_frame, ball_center, ball_radius
+    except Exception as e:
+        print(f"Ball detection error: {e}")
+        return frame, None, None
 
-    if alpha > 35:
-        alpha = 35
 
-    alpha = prevAlpha * omega + (1 - omega) * alpha
-    beta = prevBeta * omega + (1 - omega) * beta
+def ball_position_pid(ball_center, frame_shape, pid_x, pid_y, dt=0.033):
+    """Apply PID control to ball position"""
+    control_x, control_y = 0.0, 0.0
+    if ball_center and dt > 0:
+        x, y = ball_center
+        control_x, control_y = pid_x.update(x, dt), pid_y.update(y, dt)
+        control_x, control_y = max(-100, min(100, control_x)), max(-100, min(100, control_y))
+    return control_x, control_y
 
-    alpha = round(round(alpha / 0.2) * 0.2, -int(floor(log10(0.2))))
-    beta = round(round(beta / 0.2) * 0.2, -int(floor(log10(0.2))))
+def calculate_circular_setpoint(start_time, board_shape):
+    """Calculates the target (x, y) point for the ball to trace a circle."""
+    center_x = (board_shape[0] / 2) + OFFSET_PX
+    center_y = (board_shape[1] / 2) + OFFSET_PX
+    RADIUS = 140  # Radius of the circle in pixels (Reduced for safety)
+    SPEED = 0.2   # Speed of the circular motion (Reduced for stability)
 
-    if alpha <= 35 and beta <= 360:
-        prevAlpha = alpha
-        prevBeta = beta
+    elapsed_time = time.time() - start_time
+    angle = elapsed_time * SPEED * 2 * np.pi
 
-        if arduinoIsConnected and startBalanceBall:
-            key = (round(alpha, 1), round(beta, 1))
-            if key in dataDict:
-                servo_values = dataDict[key]
-                command_str = f"{servo_values[0]}|{servo_values[1]}|{servo_values[2]}\n"
-                ser.write(command_str.encode())
-            else:
-                print(f"[Warning] Angle ({key}) not found in dataDict.")
-    else:
-        print(f"[Warning] Computed angles out of range: alpha={alpha}, beta={beta}")
+    target_x = center_x + RADIUS * np.cos(angle)
+    target_y = center_y + RADIUS * np.sin(angle)
 
-prevX, prevY = 240, 240
-prevConsigneX, prevConsigneY = 240, 240
-x, y = 240, 240
-start_time = time.time()
+    return int(target_x), int(target_y)
+
+def calculate_figure_eight_setpoint(start_time, board_shape):
+    """Calculates the target (x, y) point for the ball to trace a figure-eight."""
+    center_x = (board_shape[0] / 2) + OFFSET_PX
+    center_y = (board_shape[1] / 2) + OFFSET_PX
+    RADIUS_X = 140  # Width of the figure-eight (Reduced for safety)
+    RADIUS_Y = 180  # Height of the figure-eight loops (Reduced for safety)
+    SPEED = 0.15    # Speed of the motion (Reduced for stability)
+
+    elapsed_time = time.time() - start_time
+    angle = elapsed_time * SPEED * np.pi
+
+    # Parametric equations for a Lissajous curve shaped like a figure-eight
+    target_x = center_x + RADIUS_X * np.cos(angle)
+    target_y = center_y + RADIUS_Y * np.sin(2 * angle)
+
+    return int(target_x), int(target_y)
 
 def main():
-    start_timeFPS = time.time()
-    global H, S, V
-    global getPixelColor
-    global x, y, alpha, beta
-    global prevX, prevY, prevAlpha, prevBeta, prevConsigneX, prevConsigneY
-    global consigneX, consigneY, sommeErreurX, sommeErreurY
-    global camWidth, camHeight
-    global timeInterval, start_time
-    global showVideoWindow
+    global last_valid_corners
 
-    # Read from camera
-    ret, img = cam.read()
-    if not ret or img is None:
-        print("Failed to capture from USB camera.")
-        lmain.after(100, main)
+    cap = cv2.VideoCapture(0)
+    # Give the camera time to initialize
+    time.sleep(1.0) 
+    
+    if not cap.isOpened():
+        print("Error: Could not open video stream.")
+        print("Please check the following:")
+        print("1. Is the camera connected and turned on?")
+        print("2. Is another application (e.g., Photo Booth, Zoom) using the camera?")
+        print("3. On macOS, has the terminal been granted camera permissions?")
+        print("4. Try changing cv2.VideoCapture(0) to cv2.VideoCapture(1) or higher.")
         return
+        
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    img = img[0:int(camHeight), int((camWidth - camHeight) / 2):int(camWidth - ((camWidth - camHeight) / 2))]
-    imgCircle = np.zeros(img.shape, dtype=np.uint8)
-    cv2.circle(imgCircle, (240, 240), 270, (255, 255, 255), -1, 8, 0)
-    img = img & imgCircle
-    imgHSV = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    cv2.namedWindow("PID Tuning")
+    # PID Controls with more aggressive initial values to enforce centering
+    cv2.createTrackbar("Kp_X", "PID Tuning", 80, 500, nothing)
+    cv2.createTrackbar("Ki_X", "PID Tuning", 80, 100, nothing)
+    cv2.createTrackbar("Kd_X", "PID Tuning", 25, 200, nothing)
+    cv2.createTrackbar("Kp_Y", "PID Tuning", 80, 500, nothing)
+    cv2.createTrackbar("Ki_Y", "PID Tuning", 80, 100, nothing)
+    cv2.createTrackbar("Kd_Y", "PID Tuning", 25, 200, nothing)
+    cv2.createTrackbar("Circle Mode", "PID Tuning", 0, 1, nothing)
+    cv2.createTrackbar("Figure 8 Mode", "PID Tuning", 0, 1, nothing) # New trackbar
 
-    # Color thresholds for black/grey ball detection
-    # Tune if target ball is extremely black (may require further lowering V max and H spread)
-    lowerBound = np.array([0, 0, 0])    # Minimum HSV for "blackish grey"
-    upperBound = np.array([180, 65, 65])  # Max HSV for dark grey (adjust as needed for your lighting)
-
-    mask = cv2.inRange(imgHSV, lowerBound, upperBound)
-    mask = cv2.blur(mask, (6, 6))
-    mask = cv2.erode(mask, None, iterations=2)
-    mask = cv2.dilate(mask, None, iterations=2)
+    # Ball HSV Color Tuning Controls - with new defaults
+    cv2.createTrackbar("H_min_ball", "PID Tuning", 25, 179, nothing)
+    cv2.createTrackbar("S_min_ball", "PID Tuning", 0, 255, nothing)
+    cv2.createTrackbar("V_min_ball", "PID Tuning", 80, 255, nothing)
+    cv2.createTrackbar("H_max_ball", "PID Tuning", 105, 179, nothing)
+    cv2.createTrackbar("S_max_ball", "PID Tuning", 83, 255, nothing)
+    cv2.createTrackbar("V_max_ball", "PID Tuning", 255, 255, nothing)
 
 
-    cnts = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = cnts[0] if len(cnts) == 2 else cnts[1]
-    center = None
+    last_time = time.time()
+    last_print_time = time.time()
+    circle_mode_start_time = 0
+    figure_eight_mode_start_time = 0 # New timer
+    
+    print("Starting ball tracking system...")
 
-    cv2.circle(img, (int(consigneX), int(consigneY)), 4, (255, 0, 0), 2)
-    if showCalibrationOverlay:
-        cv2.circle(img, (240, 240), 220, (255, 0, 0), 2)
-        cv2.circle(img, (240, 240), 160, (255, 0, 0), 2)
-        cv2.line(img, (240, 240), (240, 240 + 160), (255, 0, 0), 2)
-        cv2.line(img, (240, 240), (240 + 138, 240 - 80), (255, 0, 0), 2)
-        cv2.line(img, (240, 240), (240 - 138, 240 - 80), (255, 0, 0), 2)
-    if len(cnts) > 0:
-        valid_cnts = [cnt for cnt in cnts if cnt is not None and len(cnt) > 0 and cnt.dtype in [np.int32, np.float32]]
-        if valid_cnts:
-            c = max(valid_cnts, key=cv2.contourArea)
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret: 
+            print("Error: Could not read frame. Exiting.")
+            break
+            
+        now, dt = time.time(), time.time() - last_time
+        last_time = now
+
+        cropped_frame, corners, board_mask = detect_yellow_board_with_validation(frame, LOWER_YELLOW, UPPER_YELLOW)
+        
+        display_frame = frame.copy()
+        if corners is not None:
+            cv2.polylines(display_frame, [corners.astype(int)], True, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.imshow('Original Frame', display_frame)
+        if board_mask is not None: cv2.imshow("Board Mask", board_mask)
+
+        if cropped_frame is not None:
+            cv2.imshow('Warped Board', cropped_frame)
         else:
-            print("No valid contours with correct format found.")
-            c = None
-        timeInterval = time.time() - start_time
-        if c is not None:
-            (x, y), radius = cv2.minEnclosingCircle(c)
-            if radius > 10:
-                cv2.putText(img, str(int(x)) + ";" + str(int(y)), (int(x) - 50, int(y) - 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                cv2.circle(img, (int(x), int(y)), int(radius), (0, 255, 255), 2)
-                PIDcontrol(int(x), int(y), prevX, prevY, consigneX, consigneY)
-                start_time = time.time()
-    else:
-        sommeErreurX, sommeErreurY = 0, 0
+            expanded_w, expanded_h = BOARD_DIMENSIONS[0] + 2 * OFFSET_PX, BOARD_DIMENSIONS[1] + 2 * OFFSET_PX
+            cv2.imshow('Warped Board', np.zeros((expanded_h, expanded_w, 3), dtype=np.uint8))
 
-    if showVideoWindow:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(img)
-        imgtk = ImageTk.PhotoImage(image=img)
-        lmain.imgtk = imgtk
-        lmain.configure(image=imgtk)
-    lmain.after(5, main)
+        # Update sliders before detection
+        update_pid_from_sliders()
+        update_ball_hsv_from_sliders()
 
-    drawWithBall()
-    if prevConsigneX != consigneX or prevConsigneY != consigneY:
-        sommeErreurX, sommeErreurY = 0, 0
+        balled_frame, final_ball_pos, ball_radius = detect_ball(cropped_frame, ball_hsv_lower, ball_hsv_upper)
 
-    paintGraph()
-    prevX, prevY = int(x), int(y)
-    prevConsigneX, prevConsigneY = consigneX, consigneY
-    prevAlpha = alpha
-    prevBeta = beta
+        circle_mode_on = cv2.getTrackbarPos("Circle Mode", "PID Tuning") == 1
+        figure_eight_mode_on = cv2.getTrackbarPos("Figure 8 Mode", "PID Tuning") == 1
+        
+        # --- REFACTORED LOGIC FOR DYNAMIC SETPOINT ---
+        if figure_eight_mode_on:
+            if figure_eight_mode_start_time == 0:
+                figure_eight_mode_start_time = time.time()
+            circle_mode_start_time = 0  # Reset other mode timer
 
-    print("FPS: ", 1.0 / (time.time() - start_timeFPS))
+            target_x, target_y = calculate_figure_eight_setpoint(figure_eight_mode_start_time, BOARD_DIMENSIONS)
+            pid_x.setpoint = target_x
+            pid_y.setpoint = target_y
+            
+            if balled_frame is not None:
+                 cv2.circle(balled_frame, (target_x, target_y), 10, (255, 0, 255), 2) # Magenta circle for target
 
-# ==== UI Layout ====
+        elif circle_mode_on:
+            if circle_mode_start_time == 0:
+                circle_mode_start_time = time.time()
+            figure_eight_mode_start_time = 0 # Reset other mode timer
+            
+            target_x, target_y = calculate_circular_setpoint(circle_mode_start_time, BOARD_DIMENSIONS)
+            pid_x.setpoint = target_x
+            pid_y.setpoint = target_y
+            
+            if balled_frame is not None:
+                 cv2.circle(balled_frame, (target_x, target_y), 10, (0, 0, 255), 2) # Red circle for target
 
-FrameVideoControl = tk.LabelFrame(controllerWindow, text="Video Control")
-FrameVideoControl.place(x=20, y=20, width=380)
-BRetourVideo = tk.Button(FrameVideoControl, text="Show Camera Feed", command=showCameraFrameWindow)
-BRetourVideo.pack()
-BPositionCalibration = tk.Button(FrameVideoControl, text="Overlay", command=showCalibrationOverlayFunc)
-BPositionCalibration.place(x=290, y=0)
+        else:
+            # Reset to fixed center setpoint when no special mode is active
+            circle_mode_start_time = 0
+            figure_eight_mode_start_time = 0
+            pid_x.setpoint = (BOARD_DIMENSIONS[0] / 2) + OFFSET_PX
+            pid_y.setpoint = (BOARD_DIMENSIONS[1] / 2) + OFFSET_PX
 
-sliderH = tk.Scale(FrameVideoControl, from_=0, to=100, orient="horizontal", label="Hue Sensitivity", length=350, tickinterval=10)
-sliderH.set(sliderHDefault)
-sliderH.pack()
-sliderS = tk.Scale(FrameVideoControl, from_=0, to=100, orient="horizontal", label="Saturation Sensitivity", length=350, tickinterval=10)
-sliderS.set(sliderSDefault)
-sliderS.pack()
-sliderV = tk.Scale(FrameVideoControl, from_=0, to=100, orient="horizontal", label="Value Sensitivity", length=350, tickinterval=10)
-sliderV.set(sliderVDefault)
-sliderV.pack()
+        # --- UNIFIED PID CONTROL LOGIC ---
+        control_x, control_y = 0, 0
+        distance_from_center = None
 
-FrameServosControl = tk.LabelFrame(controllerWindow, text="Servos Control")
-FrameServosControl.place(x=20, y=315, width=380)
-BAbaisserPlateau = tk.Button(FrameServosControl, text="Lower Arms", command=lowerPlatform)
-BAbaisserPlateau.pack()
-BElevationBras = tk.Button(FrameServosControl, text="Raise Platform", command=raisePlatform)
-BElevationBras.pack()
-BTesterServos = tk.Button(FrameServosControl, text="Test Servo Motors", command=servosTest)
-BTesterServos.pack()
-BStartBalance = tk.Button(FrameServosControl, text="Start", command=startBalance, highlightbackground="#36db8b")
-BStartBalance.pack()
+        if final_ball_pos:
+            control_x, control_y = ball_position_pid(final_ball_pos, BOARD_DIMENSIONS, pid_x, pid_y, max(dt, 0.001))
+            # Calculate distance from the current setpoint (which could be moving)
+            current_setpoint = (pid_x.setpoint, pid_y.setpoint)
+            distance_from_center = np.linalg.norm(np.array(final_ball_pos) - np.array(current_setpoint))
+        else:
+            # If the ball is lost, reset the PID to avoid windup
+            pid_x.reset()
+            pid_y.reset()
+        
+        NEUTRAL_ANGLE = 90
+        MAX_TILT_ANGLE = 30
+        servo_angle_x = NEUTRAL_ANGLE + (control_x / 100.0) * MAX_TILT_ANGLE
+        servo_angle_y = NEUTRAL_ANGLE + (control_y / 100.0) * MAX_TILT_ANGLE
 
-FramePIDCoef = tk.LabelFrame(controllerWindow, text="PID Coefficients")
-FramePIDCoef.place(x=420, y=20, width=380)
-BafficherGraph = tk.Button(FramePIDCoef, text="Show Graph", command=showGraphWindow)
-BafficherGraph.pack()
-sliderCoefP = tk.Scale(FramePIDCoef, from_=0, to=15, orient="horizontal", label="P", length=350, tickinterval=3, resolution=0.01)
-sliderCoefP.set(sliderCoefPDefault)
-sliderCoefP.pack()
-sliderCoefI = tk.Scale(FramePIDCoef, from_=0, to=1, orient="horizontal", label="I", length=350, tickinterval=0.2, resolution=0.001)
-sliderCoefI.set(sliderCoefIDefault)
-sliderCoefI.pack()
-sliderCoefD = tk.Scale(FramePIDCoef, from_=0, to=10, orient="horizontal", label="D", length=350, tickinterval=2, resolution=0.01)
-sliderCoefD.set(sliderCoefDDefault)
-sliderCoefD.pack()
+        servo_angle_x = int(np.clip(servo_angle_x, 0, 180))
+        servo_angle_y = int(np.clip(servo_angle_y, 0, 180))
+        
+        if balled_frame is not None:
+            if final_ball_pos:
+                cv2.circle(balled_frame, final_ball_pos, ball_radius or 20, (0, 255, 0), 3)
+            cv2.imshow('Ball Detection', balled_frame)
 
-FrameBallControl = tk.LabelFrame(controllerWindow, text="Ball Control")
-FrameBallControl.place(x=420, y=315, width=380, height=132)
-BballDrawCircle = tk.Button(FrameBallControl, text="Move Ball in Circle Trajectory", command=startDrawCircle)
-BballDrawCircle.pack()
-BballDrawEight = tk.Button(FrameBallControl, text="Move Ball in Eight Trajectory", command=startDrawEight)
-BballDrawEight.pack()
+        if SERIAL_ENABLED:
+            try:
+                command = f"<{servo_angle_x},{servo_angle_y}>\n"
+                ser.write(command.encode('utf-8'))
+            except Exception as e:
+                print(f"Serial write error: {e}")
 
-label = tk.Label(controllerWindow, text="Arduino disconnected", fg="red", anchor="ne")
-label.pack(fill="both")
-BReset = tk.Button(controllerWindow, text="Reset", command=resetSlider)
-BReset.place(x=20, y=460)
-BConnect = tk.Button(controllerWindow, text="Connect", command=connectArduino, background="black")
-BConnect.place(x=100, y=460)
-BQuit = tk.Button(controllerWindow, text="Quit", command=endProgram)
-BQuit.place(x=730, y=460)
+        # --- CHANGED: Terminal output logic ---
+        if now - last_print_time > 0.1:
+            ball_pos_str = f"({final_ball_pos[0]}, {final_ball_pos[1]})" if final_ball_pos else "Not detected"
+            dist_str = f"{distance_from_center:.2f}" if distance_from_center is not None else "N/A"
+            
+            # This will now print a new line every time instead of overwriting
+            print(f"Ball: {ball_pos_str}, Distance: {dist_str}, Servos: <{servo_angle_x},{servo_angle_y}>")
+            last_print_time = now
 
-showGraphPositionX = tk.IntVar()
-showGraphPositionX.set(1)
-CheckbuttonPositionX = tk.Checkbutton(graphWindow, text="X Position", variable=showGraphPositionX, command=refreshGraph)
-CheckbuttonPositionX.place(x=500, y=20)
-showGraphPositionY = tk.IntVar()
-showGraphPositionY.set(1)
-CheckbuttonPositionY = tk.Checkbutton(graphWindow, text="Y Position", variable=showGraphPositionY, command=refreshGraph)
-CheckbuttonPositionY.place(x=500, y=40)
-showGraphAlpha = tk.IntVar()
-CheckbuttonAlpha = tk.Checkbutton(graphWindow, text="Plate Inclination", variable=showGraphAlpha, command=refreshGraph)
-CheckbuttonAlpha.place(x=500, y=60)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'): break
+        elif key == ord('r'):
+            pid_x.reset(); pid_y.reset()
+            corner_history.clear()
+            last_valid_corners = None
+            print("\nPID and history reset")
 
-videoWindow.protocol("WM_DELETE_WINDOW", donothing)
-videoWindow.bind("<Button-2>", getMouseClickPosition)
-videoWindow.bind("<Button-1>", setConsigneWithMouse)
+    cap.release()
+    cv2.destroyAllWindows()
+    if SERIAL_ENABLED and 'ser' in globals() and ser.is_open:
+        ser.write(b"<90,90>\n")
+        ser.close()
+        print("\nSerial connection closed")
 
-main()
-tk.mainloop()
+if __name__ == "__main__":
+    main()
