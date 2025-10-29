@@ -1,4 +1,7 @@
 # Interface (GUI)
+Initial simulations were done on MATLAB and Simulink which have been given in the folder MATLAB_Simulink for reference. Following this we got into the physical model .
+We created the 3D models of majority components required and got them 3D printed 
+
 The file named "interface.py" contains the final python code with the GUI 
 It uses first edge detection to detect the rectangle plate and refines the selection using yellow colour detection as we used yellow coloured plate. After it detects the yellow plate it trims the visible window to the size of the rectangle board with 2 pixel offset on each side 
 
