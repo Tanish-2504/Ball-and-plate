@@ -10,3 +10,5 @@ These calculated angles are then transferred via serial communication at a fixed
 
 There are also 2 more buttons on the GUI tab that enable circle movement and 8 shape movement 
 When enabled a red dot moves in a circle and the ball dynamically follows the red dot to trace out the desired shape 
+
+The two images named "system image.jpeg" and "system_image.jpeg" show the image of our final built model and the video named "circle_video.mp4" shows how the ball perfectly follows the circular red dot on the plate .
