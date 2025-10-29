@@ -1,50 +1,60 @@
+// Include the Servo library
 #include <Servo.h>
 
-Servo servoA;
-Servo servoB;
+// Define the pins for the two servo motors
+#define SERVO_X_PIN 9
+#define SERVO_Y_PIN 10
 
-
-float angleA = 90;
-float angleB = 90;
-
+// Create servo objects to control the servos
+Servo servoX;
+Servo servoY;
 
 void setup() {
-  Serial.begin(19200);
-  servoA.attach(10,500,2600);
-  servoB.attach(9,500,2600);
-  //angleA = map(angleA,20,160,0,180);
-  servoA.write(angleA);
-  //angleB = map(angleB,20,160,0,180);
-  servoB.write(angleB);
-  delay(1000);
+  // Start serial communication at 9600 bits per second
+  Serial.begin(9600);
+  
+  // Attach the servo objects to their respective pins
+  servoX.attach(SERVO_X_PIN);
+  servoY.attach(SERVO_Y_PIN);
+  
+  // Initialize the servos to the neutral (level) position
+  servoX.write(90);
+  servoY.write(90);
+  
+  Serial.println("Arduino ready to receive servo angles.");
 }
-
-int count = 0;
 
 void loop() {
-
-  if(Serial.available() > 0) {
-    String a = Serial.readStringUntil('\n');
-    angleA = getValue(a, ',', 0).toFloat();  
-    angleB = getValue(a, ',', 1).toFloat();      
-    servoA.write(angleA);
-    servoB.write(angleB);
-    //delay(3);
-  }
-
-}
-
-String getValue(String data, char separator, int index) {
-    int found = 0;
-    int strIndex[] = { 0, -1 };
-    int maxIndex = data.length() - 1;
-
-    for (int i = 0; i <= maxIndex && found <= index; i++) {
-        if (data.charAt(i) == separator || i == maxIndex) {
-            found++;
-            strIndex[0] = strIndex[1] + 1;
-            strIndex[1] = (i == maxIndex) ? i+1 : i;
-        }
+  // Check if data is available to read from the serial port
+  if (Serial.available() > 0) {
+    // Read the incoming string from Python until a newline character is found
+    String data = Serial.readStringUntil('\n');
+    
+    // Check if the received data is in the expected format (e.g., "<95,88>")
+    if (data.startsWith("<") && data.endsWith(">")) {
+      
+      // Remove the start and end markers
+      data = data.substring(1, data.length() - 1);
+      
+      // Find the comma that separates the two angle values
+      int commaIndex = data.indexOf(',');
+      
+      // Extract the string for the X angle and the Y angle
+      String angleX_str = data.substring(0, commaIndex);
+      String angleY_str = data.substring(commaIndex + 1);
+      
+      // Convert the angle strings to integersgive
+      int angleX = angleX_str.toInt();
+      int angleY = angleY_str.toInt();
+      
+      // Constrain the values to a safe range (0-180) to prevent servo damage
+      angleX = constrain(angleX, 0, 180);
+      angleY = constrain(angleY, 0, 180);
+      
+      // Write the final angles to the servos
+      servoX.write(angleX);
+      servoY.write(angleY);
     }
-    return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
+  }
 }
+
