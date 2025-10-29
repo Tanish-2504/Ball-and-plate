@@ -3,42 +3,39 @@ import cv2
 import numpy as np
 import serial
 from collections import deque
-# Assuming PIDController is correctly defined in PID_controller.py
 from PID_controller import PIDController 
 
 BOARD_DIMENSIONS = (500, 625)
-# --- CHANGED: Serial communication is now enabled by default ---
+
 SERIAL_ENABLED = True
 
-# --- Constants for visual offset ---
+#Constants for visual offset
 PIXELS_PER_CM = 15
 OFFSET_CM = 1
 OFFSET_PX = int(OFFSET_CM * PIXELS_PER_CM)
 
-# --- Predefined Color Range for the Board (UPDATED TO MATCH IMAGE) ---
-# These values are derived from the 'Color Tuning' window in the provided image.
-LOWER_YELLOW = np.array([7, 63, 121]) # H_min 7, S_min 63, V_min 121
-UPPER_YELLOW = np.array([32, 255, 255]) # H_max 32, S_max 255, V_max 255
+#Predefined Color Range for the Board (UPDATED TO MATCH IMAGE) 
+#These values are derived from the 'Color Tuning' window in the provided image.
+LOWER_YELLOW = np.array([7, 63, 121]) 
+UPPER_YELLOW = np.array([32, 255, 255]) 
 
-# --- CHANGED: Increased PID gains for more aggressive and accurate centering ---
-# Initialize PID controllers
+
+#Initialize PID controllers
 pid_x = PIDController(Kp=1.2, Ki=0.05, Kd=0.2, setpoint=(BOARD_DIMENSIONS[0] / 2) + OFFSET_PX)
 pid_y = PIDController(Kp=1.2, Ki=0.05, Kd=0.2, setpoint=(BOARD_DIMENSIONS[1] / 2) + OFFSET_PX)
 
 
-# --- Temporal smoothing for board corners ---
+#Temporal smoothing for board corners 
 corner_history = deque(maxlen=5)
 last_valid_corners = None
 
-# --- Ball HSV Color Range (will be updated by trackbars) ---
+#Ball HSV Color Range (will be updated by trackbars) ---
 ball_hsv_lower = np.array([25, 0, 80])
 ball_hsv_upper = np.array([105, 83, 255])
 
 
 if SERIAL_ENABLED:
     try:
-        # NOTE: You may need to change this port to match your Arduino's serial port
-        # UPDATED PORT to match your provided code
         ser = serial.Serial('/dev/cu.usbmodem12301', 9600, timeout=1)
         print("Serial connection established")
     except Exception as e:
@@ -49,7 +46,7 @@ def nothing(x):
     pass
 
 def update_pid_from_sliders():
-    """Update PID parameters from trackbar values"""
+    
     pid_x.Kp = cv2.getTrackbarPos("Kp_X", "PID Tuning") / 100.0
     pid_x.Ki = cv2.getTrackbarPos("Ki_X", "PID Tuning") / 1000.0
     pid_x.Kd = cv2.getTrackbarPos("Kd_X", "PID Tuning") / 100.0
@@ -59,7 +56,6 @@ def update_pid_from_sliders():
     pid_y.Kd = cv2.getTrackbarPos("Kd_Y", "PID Tuning") / 100.0
 
 def update_ball_hsv_from_sliders():
-    """Update ball HSV color range from trackbar values"""
     global ball_hsv_lower, ball_hsv_upper
     h_min = cv2.getTrackbarPos("H_min_ball", "PID Tuning")
     s_min = cv2.getTrackbarPos("S_min_ball", "PID Tuning")
@@ -106,7 +102,6 @@ def order_points_improved(pts):
     return rect
 
 def detect_yellow_board_robust(frame, lower_bound, upper_bound, output_size=BOARD_DIMENSIONS, debug=False):
-    """Detect the yellow board using slider values and stable corner finding."""
     if frame is None:
         return None, None, None, None
 
@@ -157,7 +152,6 @@ def detect_yellow_board_robust(frame, lower_bound, upper_bound, output_size=BOAR
         return original_frame, None, None, mask
 
 def detect_yellow_board_with_validation(frame, lower_bound, upper_bound, output_size=BOARD_DIMENSIONS):
-    """Main wrapper with validation"""
     if frame is None: return frame, None, None
     warped, corners, _, mask = detect_yellow_board_robust(frame, lower_bound, upper_bound, output_size, debug=False)
     if corners is not None and warped is not None:
@@ -243,8 +237,8 @@ def calculate_circular_setpoint(start_time, board_shape):
     """Calculates the target (x, y) point for the ball to trace a circle."""
     center_x = (board_shape[0] / 2) + OFFSET_PX
     center_y = (board_shape[1] / 2) + OFFSET_PX
-    RADIUS = 140  # Radius of the circle in pixels (Reduced for safety)
-    SPEED = 0.2   # Speed of the circular motion (Reduced for stability)
+    RADIUS = 140  
+    SPEED = 0.2   
 
     elapsed_time = time.time() - start_time
     angle = elapsed_time * SPEED * 2 * np.pi
@@ -258,9 +252,9 @@ def calculate_figure_eight_setpoint(start_time, board_shape):
     """Calculates the target (x, y) point for the ball to trace a figure-eight."""
     center_x = (board_shape[0] / 2) + OFFSET_PX
     center_y = (board_shape[1] / 2) + OFFSET_PX
-    RADIUS_X = 140  # Width of the figure-eight (Reduced for safety)
-    RADIUS_Y = 180  # Height of the figure-eight loops (Reduced for safety)
-    SPEED = 0.15    # Speed of the motion (Reduced for stability)
+    RADIUS_X = 140  
+    RADIUS_Y = 180  
+    SPEED = 0.15
 
     elapsed_time = time.time() - start_time
     angle = elapsed_time * SPEED * np.pi
@@ -292,7 +286,6 @@ def main():
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     cv2.namedWindow("PID Tuning")
-    # PID Controls with more aggressive initial values to enforce centering
     cv2.createTrackbar("Kp_X", "PID Tuning", 80, 500, nothing)
     cv2.createTrackbar("Ki_X", "PID Tuning", 80, 100, nothing)
     cv2.createTrackbar("Kd_X", "PID Tuning", 25, 200, nothing)
@@ -300,9 +293,9 @@ def main():
     cv2.createTrackbar("Ki_Y", "PID Tuning", 80, 100, nothing)
     cv2.createTrackbar("Kd_Y", "PID Tuning", 25, 200, nothing)
     cv2.createTrackbar("Circle Mode", "PID Tuning", 0, 1, nothing)
-    cv2.createTrackbar("Figure 8 Mode", "PID Tuning", 0, 1, nothing) # New trackbar
+    cv2.createTrackbar("Figure 8 Mode", "PID Tuning", 0, 1, nothing)
 
-    # Ball HSV Color Tuning Controls - with new defaults
+    # Ball HSV Color Tuning Controls
     cv2.createTrackbar("H_min_ball", "PID Tuning", 25, 179, nothing)
     cv2.createTrackbar("S_min_ball", "PID Tuning", 0, 255, nothing)
     cv2.createTrackbar("V_min_ball", "PID Tuning", 80, 255, nothing)
@@ -314,7 +307,7 @@ def main():
     last_time = time.time()
     last_print_time = time.time()
     circle_mode_start_time = 0
-    figure_eight_mode_start_time = 0 # New timer
+    figure_eight_mode_start_time = 0 
     
     print("Starting ball tracking system...")
 
@@ -341,7 +334,6 @@ def main():
             expanded_w, expanded_h = BOARD_DIMENSIONS[0] + 2 * OFFSET_PX, BOARD_DIMENSIONS[1] + 2 * OFFSET_PX
             cv2.imshow('Warped Board', np.zeros((expanded_h, expanded_w, 3), dtype=np.uint8))
 
-        # Update sliders before detection
         update_pid_from_sliders()
         update_ball_hsv_from_sliders()
 
@@ -350,39 +342,39 @@ def main():
         circle_mode_on = cv2.getTrackbarPos("Circle Mode", "PID Tuning") == 1
         figure_eight_mode_on = cv2.getTrackbarPos("Figure 8 Mode", "PID Tuning") == 1
         
-        # --- REFACTORED LOGIC FOR DYNAMIC SETPOINT ---
+        
         if figure_eight_mode_on:
             if figure_eight_mode_start_time == 0:
                 figure_eight_mode_start_time = time.time()
-            circle_mode_start_time = 0  # Reset other mode timer
+            circle_mode_start_time = 0  
 
             target_x, target_y = calculate_figure_eight_setpoint(figure_eight_mode_start_time, BOARD_DIMENSIONS)
             pid_x.setpoint = target_x
             pid_y.setpoint = target_y
             
             if balled_frame is not None:
-                 cv2.circle(balled_frame, (target_x, target_y), 10, (255, 0, 255), 2) # Magenta circle for target
+                 cv2.circle(balled_frame, (target_x, target_y), 10, (255, 0, 255), 2) 
 
         elif circle_mode_on:
             if circle_mode_start_time == 0:
                 circle_mode_start_time = time.time()
-            figure_eight_mode_start_time = 0 # Reset other mode timer
+            figure_eight_mode_start_time = 0 
             
             target_x, target_y = calculate_circular_setpoint(circle_mode_start_time, BOARD_DIMENSIONS)
             pid_x.setpoint = target_x
             pid_y.setpoint = target_y
             
             if balled_frame is not None:
-                 cv2.circle(balled_frame, (target_x, target_y), 10, (0, 0, 255), 2) # Red circle for target
+                 cv2.circle(balled_frame, (target_x, target_y), 10, (0, 0, 255), 2) 
 
         else:
-            # Reset to fixed center setpoint when no special mode is active
+           
             circle_mode_start_time = 0
             figure_eight_mode_start_time = 0
             pid_x.setpoint = (BOARD_DIMENSIONS[0] / 2) + OFFSET_PX
             pid_y.setpoint = (BOARD_DIMENSIONS[1] / 2) + OFFSET_PX
 
-        # --- UNIFIED PID CONTROL LOGIC ---
+        # Unified PID control logic
         control_x, control_y = 0, 0
         distance_from_center = None
 
@@ -416,12 +408,10 @@ def main():
             except Exception as e:
                 print(f"Serial write error: {e}")
 
-        # --- CHANGED: Terminal output logic ---
+        
         if now - last_print_time > 0.1:
             ball_pos_str = f"({final_ball_pos[0]}, {final_ball_pos[1]})" if final_ball_pos else "Not detected"
             dist_str = f"{distance_from_center:.2f}" if distance_from_center is not None else "N/A"
-            
-            # This will now print a new line every time instead of overwriting
             print(f"Ball: {ball_pos_str}, Distance: {dist_str}, Servos: <{servo_angle_x},{servo_angle_y}>")
             last_print_time = now
 
